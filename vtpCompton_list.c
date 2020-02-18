@@ -28,9 +28,13 @@
  *
  *************************************************************************/
 
+/* Define initial blocklevel and buffering level */
+#define BLOCKLEVEL  1
+#define BUFFERLEVEL 4
+
 /* Event Buffer definitions */
 #define MAX_EVENT_POOL     10
-#define MAX_EVENT_LENGTH   1024*64      /* Size in Bytes */
+#define MAX_EVENT_LENGTH   4000000 /* Size in Bytes - 4194304 is max allowable */
 
 /* Define Interrupt source and address */
 #define TI_MASTER
@@ -39,12 +43,18 @@
 //#define INTRANDOMPULSER
 #define TI_DATA_READOUT
 
-/* VETROC definitions */
+/* VETROC definitions *///#define USE_VETROC
 #define USE_VETROC
-#define MAXVETROCDATA 1000
+#define MAXVETROCDATA 1200*BLOCKLEVEL
 #define VETROC_SLOT 13					/* slot of first vetroc */
 #define VETROC_SLOT_INCR 1			/* slot increment */
 #define NVETROC	4								/* number of vetrocs used */
+#define VETROC_ROMODE 1  /* Readout Mode: 0 = SCT, 1 = Single Board DMA, 2 = MultiBoard DMA */
+#define VETROC_READ_CONF_FILE {			\
+    vetrocConfig("");				\
+    if(rol->usrConfig)				\
+      vetrocConfig(rol->usrConfig);		\
+  }
 
 /* FADC definitions */
 #define USE_FADC
@@ -63,19 +73,22 @@
 /* VTP definitions */
 #define USE_VTP
 
+/* Scaler definitions */
+#define SCAL_ADDR 0xa10000		/* Defined in SIS3801.h */
+
 /* Measured longest fiber length in system */
 #define FIBER_LATENCY_OFFSET 0x4A
-
-/* Define initial blocklevel and buffering level */
-#define BLOCKLEVEL  1
-#define BUFFERLEVEL 1
 
 /* Include */
 #include "dmaBankTools.h"   /* Macros for handling CODA banks */
 #include "tiprimary_list.c" /* Source required for CODA readout lists using the TI */
 #include "vetrocLib.h"      /* VETROC library */
+#include "vetrocConfig.h"
 #include "fadcLib.h"        /* library of FADC250 routines */
+#include "fadc250Config.h"
 #include "sdLib.h"
+#include "SIS3801.h"        /* 3801 scaler library */
+#include "SIS.h"            /* 3801 scaler library */
 
 /* SD variables */
 static unsigned int sdScanMask = 0;
@@ -88,7 +101,10 @@ extern int vetrocA32Base;                      /* Minimum VME A32 Address for us
 
 /* FADC variables */
 extern int fadcA32Base, nfadc;
-unsigned int MAXFADCWORDS=0;	/* for calculation of max words in the block transfer */
+unsigned int MAXFADCWORDS = 2100*BLOCKLEVEL;	/* for calculation of max words in the block transfer */
+
+/* Scaler variables */
+int use_3801=1;
 
 /****************************************
  *  DOWNLOAD
@@ -114,6 +130,17 @@ rocDownload()
 
   blockLevel = BLOCKLEVEL;
 
+
+	/*****************
+	 *  SIS3801 SETUP
+	 *****************/
+	if (use_3801)
+	{
+		initSIS();
+		clrAllCntSIS();
+	}
+
+
   /*****************
    *   TI SETUP
    *****************/
@@ -126,15 +153,21 @@ rocDownload()
    *      TI_TRIGGER_TSREV2    4  Ribbon cable from Legacy TS module
    *      TI_TRIGGER_PULSER    5  TI Internal Pulser (Fixed rate and/or random)
    */
-//  tiSetTriggerSource(TI_TRIGGER_FPTRG);  //Front panel trg;
+#ifdef INTRANDOMPULSER
+  tiSetTriggerSource(TI_TRIGGER_PULSER);
+#else
   tiSetTriggerSource(TI_TRIGGER_TSINPUTS);  //TS Inputs trigger;
-//  tiSetTriggerSource(TI_TRIGGER_PULSER);  //TS Inputs trigger;
-
+#endif
 
   tiFakeTriggerBankOnError(0);
 
+  tiSetTriggerLatchOnLevel(1);
+  tiSetFPInputReadout(1);
   /* Enable set specific TS input bits (1-6) */
-  tiEnableTSInput( TI_TSINPUT_1 );
+  tiEnableTSInput( TI_TSINPUT_ALL);
+//	tiDisableTSInput( TI_TSINPUT_6 );
+//  tiEnableTSInput( TI_TSINPUT_6);
+//  tiSetInputPrescale(6,1); 
 
   /* Load the trigger table that associates
    *  pins 21/22 | 23/24 | 25/26 : trigger1
@@ -142,15 +175,21 @@ rocDownload()
    */
   tiLoadTriggerTable(0);
 
-  tiSetTriggerHoldoff(1,10,0);
-  tiSetTriggerHoldoff(2,10,0);
+  //  tiSetTriggerHoldoff(1,10,0);	// no more than 1 triggers in 10*16ns  - VETORC fails (BLOCKLEVEL=8,BUFFERLEVEL=4)
+//  tiSetTriggerHoldoff(1,10,1);	// no more than 1 triggers in 10*480ns - VETROC fails (BLOCKLEVEL=8,BUFFERLEVEL=4)
+//  tiSetTriggerHoldoff(1,11,1);	// no more than 1 triggers in 11*480ns - VETROC works (BLOCKLEVEL=8,BUFFERLEVEL=4)
+//  tiSetTriggerHoldoff(1,12,1);	// no more than 1 triggers in 12*480ns - VETROC works (BLOCKLEVEL=8,BUFFERLEVEL=4)
+  // tiSetTriggerHoldoff(1,15,1);	// no more than 1 triggers in 15*480ns - VETROC works (BLOCKLEVEL=8,BUFFERLEVEL=4)
+  tiSetTriggerHoldoff(1,31,1);	// no more than 1 triggers in 31*480ns - VETROC works (BLOCKLEVEL=8,BUFFERLEVEL=4)
+
+  tiSetTriggerHoldoff(2,10,0);	// no more than 2 triggers in 10*16ns
 
   /* Set initial number of events per block */
   tiSetBlockLevel(blockLevel);
 
   /* Set Trigger Buffer Level */
   tiSetBlockBufferLevel(BUFFERLEVEL);
-  
+
 	/* Enable ti data readout */
 	tiEnableDataReadout();
 
@@ -168,6 +207,7 @@ rocDownload()
   else
     {
       printf("Will try to use SD in Switch Slot\n");
+      sdSetActiveVmeSlots(0);	// clear active slots
 #ifdef USE_FADC
       /* FADC Initialization flags */
       faflag = 0; /* NO SDC */
@@ -189,20 +229,18 @@ rocDownload()
   //faflag |= FA_INIT_VXS_TRIG;  /* VXS trigger source */
   //faflag |= FA_INIT_VXS_CLKSRC;  /* VXS 250MHz Clock source */
 
-  fadcA32Base = 0x09000000; /* Set the Base address of the FADC block data registers */
+  fadcA32Base = 0x08800000; /* Set the Base address of the FADC block data registers */
 
   vmeSetQuietFlag(1);
   faInit(FADC_ADDR, FADC_INCR, NFADC, faflag);
   vmeSetQuietFlag(0);
 
-
-  sdScanMask |= faScanMask();
-  sdSetActiveVmeSlots(sdScanMask); /* Tell the sd where to find the fadcs */
+  // We will set the busy out to the SD after the vetroc is added
 
   /* Just one FADC250 */
   faDisableMultiBlock();
 
-    /* configure all modules based on config file */
+  /* configure all modules based on config file */
   FADC_READ_CONF_FILE;
 
   for(ifa = 0; ifa < nfadc; ifa++)
@@ -215,31 +253,6 @@ rocDownload()
       faSetTrigOut(faSlot(ifa), 7);
     }
 
-  if(FADC_MODE == 3)
-    {
-      /*
-	Block header
-	+ blocklevel *
-	(Event Header + TriggerTime * 2 + MAX_PULSES * MAX_CHAN * 3 * PulseParameter
-	+ Event Trailer)
-	+ Block Trailer
-	+ 3 * FillerWord
-	= 1 + blocklevel*(1 + 2 + 4 * 16 * 3 * 1 + 1) + 1 + 3
-      */
-      MAXFADCWORDS = 5 + blockLevel * (196) + 4; /* 4 = fudge */
-    }
-  else /* FADC_MODE == 1 or 2 */
-    {
-      /*
-	All from 9, and raw window data (2 samples per word)
-	5 + blocklevel * (196 + WindowWidth / 2);
-      */
-      //    MAXFADCWORDS = 5 + blockLevel * (196 + (FADC_WINDOW_WIDTH >> 1) ) + 4; /* 4 = fudge */
-      MAXFADCWORDS = 4000;
-    }
-#endif
-
-#ifdef USE_FADC
   faGStatus(0);
 #endif
 
@@ -277,7 +290,7 @@ rocPrestart()
   //	vtflag = 0x20;  /* FP 1  0x020;  MAY NEED TO BE CHANGED*/
   vtflag = 0x111; /* vxs sync-reset, trigger, clock */
 
-  vetrocA32Base = 0x0A000000;
+  vetrocA32Base = 0x09000000;
   nvetroc = vetrocInit((VETROC_SLOT<<19),(VETROC_SLOT_INCR<<19) , NVETROC, vtflag);
   if (nvetroc <= 0) {
     printf("ERROR: no VETROC !!! \n");
@@ -292,59 +305,18 @@ rocPrestart()
   sdScanMask |= vetrocScanMask();
   sdSetActiveVmeSlots(sdScanMask); /* Tell the sd where to find the vetrocs */
 
-  vetrocGSetProcMode(4000, 4000); // ns units (8 us max.)
-
-  int igrp;
   for(ivt=0; ivt<nvetroc; ivt++)
     {
       vetrocLinkReset(vetrocSlot(ivt));
       vetrocClear(vetrocSlot(ivt));
-
-      for(igrp = 0; igrp < 8; igrp++)
-      {
-	vetrocChanDisable(vetrocSlot(ivt), igrp, 0xffff);
-        /* Invert all VETROC inputs to be compatible with Compton 50pin connectors */
-        vetrocChanInvert(vetrocSlot(ivt), igrp, 0xffff);
-      }
     }
 
+  /* configure all modules based on config file */
+  VETROC_READ_CONF_FILE;
 
-#if 1
-  vetrocChanDisable(13, 0, 0);
-  vetrocChanDisable(13, 1, 0);
-  vetrocChanDisable(13, 2, 0);
-  vetrocChanDisable(13, 3, 0);
-  vetrocChanDisable(13, 4, 0x8);
-  vetrocChanDisable(13, 5, 0);
-  vetrocChanDisable(13, 6, 0xA);
-  vetrocChanDisable(13, 7, 0);
 
-  vetrocChanDisable(14, 0, 0);
-  vetrocChanDisable(14, 1, 0);
-  vetrocChanDisable(14, 2, 0);
-  vetrocChanDisable(14, 3, 0);
-  vetrocChanDisable(14, 4, 0xB);
-  vetrocChanDisable(14, 5, 0);
-  vetrocChanDisable(14, 6, 0x18);
-  vetrocChanDisable(14, 7, 0);
-
-  vetrocChanDisable(15, 0, 0);
-  vetrocChanDisable(15, 1, 0);
-  vetrocChanDisable(15, 2, 0);
-  vetrocChanDisable(15, 3, 0);
-  vetrocChanDisable(15, 4, 0xB);
-  vetrocChanDisable(15, 5, 0);
-  vetrocChanDisable(15, 6, 0x8);
-  vetrocChanDisable(15, 7, 0);
-
-  vetrocChanDisable(16, 0, 0);
-  vetrocChanDisable(16, 1, 0x28);
-  vetrocChanDisable(16, 2, 0x46);
-  vetrocChanDisable(16, 3, 0x340);
-  vetrocChanDisable(16, 4, 0x8A);
-  vetrocChanDisable(16, 5, 0);
-  vetrocChanDisable(16, 6, 0x8);
-  vetrocChanDisable(16, 7, 0x400);
+#if(VETROC_ROMODE==2)
+  vetrocEnableMultiBlock();
 #endif
 
 #endif
@@ -359,6 +331,8 @@ rocPrestart()
 
   /* Print status for all boards */
 #ifdef USE_FADC
+  /* Add FADC slot as a busy source to the SD */
+  sdSetBusyVmeSlots(faScanMask(), 0 /* 0 = do not reset current busy settings */);
   faEnableSyncReset(faSlot(0));
   faGStatus(0);
 #endif
@@ -391,21 +365,29 @@ rocGo()
   faGEnable(0, 0);
 #endif
 
+	if (use_3801)
+	{
+		printf("Clearing scalers \n");
+		runStartClrSIS();
+
+	}
+
 #ifdef USE_VETROC
   vetrocGSetBlockLevel(blockLevel);
 #endif
+
   /* Interrupts/Polling enabled after conclusion of rocGo() */
 
   /* Example: How to start internal pulser trigger */
 #ifdef INTRANDOMPULSER
-  /* Enable Random at rate 500kHz/(2^7) = ~3.9kHz */
-//  tiSetRandomTrigger(1,0x7);
-  tiSetRandomTrigger(1,0x3);
+  /* Enable Random at rate 500kHz/(2^N): N=7: ~3.9kHz, N=3: ~62kHz  */
+  tiSetRandomTrigger(1,0x7);
 #elif defined (INTFIXEDPULSER)
   /* Enable fixed rate with period (ns) 120 +30*700*(1024^0) = 21.1 us (~47.4 kHz)
      - Generated 1000 times */
   tiSoftTrig(1,1000,700,0);
 #endif
+
   tiSetBlockLimit(0);
 
   tiStatus(1);
@@ -417,7 +399,6 @@ rocGo()
 void
 rocEnd()
 {
-  int ivt, islot;
 
   /* Example: How to stop internal pulser trigger */
 #ifdef INTRANDOMPULSER
@@ -453,10 +434,9 @@ rocEnd()
 void
 rocTrigger(int arg)
 {
-  int ii, jj, gbready, itime, read_stat, stat;
-  int ivt, ifa, nwords_fa, nwords_vt, blockError, dCnt, len=0, idata;
+  int ii, gbready, itime, read_stat, stat;
+  int ivt = 0, ifa, nwords_fa, nwords_vt, blockError, dCnt;
   unsigned int val;
-  unsigned int *start;
   unsigned int datascan, scanmask, roCount;
 
   /* Set TI output 1 high for diagnostics */
@@ -468,7 +448,7 @@ rocTrigger(int arg)
      Trigger Block MUST be reaodut first */
 //  dCnt = tiReadBlock(dma_dabufp,8+(5*blockLevel),1);trigBankType
 	/* Open a trigger bank */
-	BANKOPEN(0xff11, BT_SEG, blockLevel);
+	/* BANKOPEN(0xff11, BT_SEG, blockLevel); */
 /*	for (jj = 0; jj < blockLevel; jj++)
 	{
 		*dma_dabufp++ = (arg<<24)|(0x01<<16)|(1);
@@ -495,18 +475,6 @@ rocTrigger(int arg)
       dma_dabufp += dCnt;
     }
 
-/*	BANKOPEN(0xff11, BT_SEG, blockLevel);*/
-	*dma_dabufp++ = LSWAP(0xdead2);
-	BANKCLOSE;
-
-  /* EXAMPLE: How to open a bank (type=5) and add data words by hand */
-  BANKOPEN(5,BT_UI4,blockLevel);
-  *dma_dabufp++ = LSWAP(tiGetIntCount());
-  *dma_dabufp++ = LSWAP(0xdead);
-  *dma_dabufp++ = LSWAP(0xcebaf111);
-  *dma_dabufp++ = LSWAP(0xcebaf222);
-  BANKCLOSE;
-
 #ifdef USE_FADC
   /* fADC250 Readout */
   BANKOPEN(3,BT_UI4,blockLevel);
@@ -522,7 +490,7 @@ rocTrigger(int arg)
     {
       for(ifa = 0; ifa < nfadc; ifa++)
 	{
-	  nwords_fa = faReadBlock(faSlot(ifa), dma_dabufp, MAXFADCWORDS, 1);
+	  nwords_fa = faReadBlock(faSlot(ifa), dma_dabufp + 1, MAXFADCWORDS, 1);
 	  *dma_dabufp++ = LSWAP(nwords_fa);
 
 	  /* Check for ERROR in block read */
@@ -534,11 +502,11 @@ rocTrigger(int arg)
 		     faSlot(ifa), roCount, nwords_fa);
 
 	      if(nwords_fa > 0)
-		dma_dabufp += nwords_fa-1;
+		dma_dabufp += nwords_fa;
 	    }
 	  else
 	    {
-	      dma_dabufp += nwords_fa-1;
+	      dma_dabufp += nwords_fa;
 	    }
 	}
     }
@@ -552,6 +520,9 @@ rocTrigger(int arg)
 #ifdef USE_VETROC
   /* Bank for VETROC data */
   BANKOPEN(4,BT_UI4,0);
+  *dma_dabufp++ = LSWAP(0xb0b0b0b4); /* First word */
+  dCnt = 0;
+
   /* Check for valid data in VETROC */
   read_stat = 0;
 
@@ -568,22 +539,69 @@ rocTrigger(int arg)
 
   if(read_stat>0)
     { /* read the data here */
+#if(VETROC_ROMODE==2)
+      ivt = 0;
+#else
       for(ivt=0; ivt<nvetroc; ivt++)
+#endif
 	{
-	  *dma_dabufp++ = LSWAP(0xb0b0b0b4); /* First word */
-          /* skip 1 word so nwords_vt is written before buffer to keep same format as before */
-	  nwords_vt = vetrocReadFIFO(vetrocSlot(ivt), &dma_dabufp[1], MAXVETROCDATA, 1);
+	  /* skip 1 word so nwords_vt is written before buffer to keep same format as before */
+	  nwords_vt = vetrocReadBlock(vetrocSlot(ivt), dma_dabufp + 1,
+				      MAXVETROCDATA, VETROC_ROMODE);
 	  *dma_dabufp++ = LSWAP(nwords_vt);
+
           dma_dabufp+= nwords_vt;
 	}
     }
   else
     {
       printf("Missed VETROC event data: gbready=0x%08X, vetrocSlotMask=0x%08X\n", gbready, vetrocSlotMask);
-  //    tiSetBlockLimit(1);
+      fflush(stdout);
+      tiSetBlockLimit(1);
+      vetrocGStatus(1);
     }
   BANKCLOSE;
 #endif
+
+	/* Scaler readout */
+	if (use_3801)
+	{	
+		BANKOPEN(6,BT_UI4,0);
+		int k=0;
+
+//SISFIFO_start(); //what is this one for?
+//				if(SISFIFO_Check()||tiGetIntCount()==2) //why is this necessary?
+		if(SISFIFO_Check())
+		{
+			*dma_dabufp++ = LSWAP(0xb0b0b0b6);
+
+			for (k=0; k<1; k++)
+			{
+				int not_empty=SISFIFO_Read();
+//							printf("3801 empty or not? %d\n", not_empty); 
+				if(not_empty==0) break;
+				else 
+				{
+					*dma_dabufp++ = LSWAP(0xb2b2b000|k);
+//						*dma_dabufp++ = LSWAP(Read3801(0,0)&0xc0000000);
+
+					for (ii=0; ii<32; ii++)
+					{
+							*dma_dabufp++ = LSWAP( Read3801(0,ii)&DATA_MASK);
+//								*dma_dabufp++ = LSWAP( Read3801(0,ii));
+					}
+					*dma_dabufp++ = LSWAP(0xda0000aa);
+/*								*dma_dabufp++ = LSWAP((Read3801(0,0)&UPBIT_MASK)>>24);
+								*dma_dabufp++ = LSWAP((Read3801(0,0)&QRT_MASK)>>31);
+								*dma_dabufp++ = LSWAP((Read3801(0,0)&HELICITY_MASK)>>30);
+*/			}
+			}
+		}
+
+		*dma_dabufp++ = LSWAP(0xda0000ff);  /* Event EOB */
+		BANKCLOSE;
+
+	}
 
   /* Set TI output 0 low */
   tiSetOutputPort(0,0,0,0);

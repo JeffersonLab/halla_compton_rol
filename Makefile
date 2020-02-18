@@ -12,8 +12,13 @@ DEBUG	?= 1
 QUIET	?= 1
 #
 
+
+#SCAL_LIB		= ${LINUXVME_LIB}/SIS3801.so
+SCAL_LIB		= ${HOME}/linuxvme/scaler/sis3801/SIS3801.so
+MODULE_CONFIG = ${ACOMP}/src/linuxvme
+
 # Plug in your primary readout lists here..
-VMEROL			= merge_vetroc_fadc_list.so fadc_sd_list.so
+VMEROL			= merge_vetroc_fadc_list.so fadc_sd_list.so vtpCompton_list.so
 # Add shared library dependencies here.  (jvme, ti, are already included)
 ROLLIBS			= -lvetroc -lfadc -lsd -lts
 
@@ -33,10 +38,13 @@ else
 CFLAGS			= -O3
 endif
 CFLAGS			+= -DJLAB -DLINUX -DDAYTIME=$(COMPILE_TIME)
+CFLAGS			+= ${SCAL_LIB}
 
 INCS			= -I. -I$(HOME)/Linux-$(ARCH)/include \
 				-isystem${LINUXVME_INC} \
-				-isystem${CODA}/common/include
+				-isystem${CODA}/common/include \
+				-I${MODULE_CONFIG}/fadc-HallB \
+				-I${MODULE_CONFIG}/vetroc
 LIBS			= -L. -L$(HOME)/Linux-$(ARCH)/lib \
 				-L${LINUXVME_LIB} \
 				-L${CODA}/${MACHINE}/lib \
